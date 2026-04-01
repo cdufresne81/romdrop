@@ -1,6 +1,6 @@
 # How to Map Tables for a New Undocumented NC Miata ROM
 
-This guide describes a systematic procedure for identifying the generation and predicting table addresses for a new ROM that is not yet in the metadata directory. It is based on structural analysis of all 103 documented MX-5 NC ROMs.
+This guide describes a systematic procedure for identifying the generation and predicting table addresses for a new ROM that is not yet in the metadata directory. It is based on structural analysis of all 103 documented MX-5 NC ROMs (104 XML files exist in `metadata/`, but L3R3EE is a Mazda6 and is excluded).
 
 ---
 
@@ -12,7 +12,9 @@ All NC Miata ROMs share the same SH7058 processor and the same fundamental table
 2. **Firmware revision** — shifts the entire base calibration block by a uniform offset
 3. **Speeps patch presence** — [Flex], Launch Control, Flat Shift, MAF Emulation (SD/Alpha-N), and Patch-category tables are aftermarket additions at fixed addresses, not factory
 
-The key insight: **within a generation, all 8 factory Spark Target base tables (and by extension, all factory calibration tables) move as a rigid block.** If you can locate one table, you can compute the offset delta from a known ROM and predict all others.
+The key insight: **within a generation, all 8 factory Spark Target base tables move as a rigid block.** If you can locate one spark target table, you can compute the offset delta from a known ROM and predict all other spark target addresses.
+
+**Important caveat:** This "rigid block" behavior is verified for Spark Target tables and closely related tables (e.g., Fuel Target OL). However, **other category blocks (MAF Scaling, Idle Speed, Engine Sensor, etc.) may shift by different amounts** between firmware revisions. Each major category block must be anchored independently — do not assume a single global delta applies to the entire ROM.
 
 ---
 
@@ -40,6 +42,8 @@ Search for any table with `category="DBW - Brake Override"`. This is a binary te
 | Absent             | **NC2.0 (Early)** |
 | Present            | **NC2.0 (Late) or NC3.0** (proceed to C) |
 
+Note: The suffix letter on cross-generation ROM IDs determines which path is taken here. For example, LF9HED (suffix D) has no DBW and is NC2-early, while LF9HEE (suffix E) has DBW and is NC2-late. The prefix alone is not sufficient.
+
 ### Discriminator C: Base Table Address Range
 
 Check the address of "Spark Target | High Fuel Demand, Low-Det":
@@ -49,13 +53,13 @@ Check the address of "Spark Target | High Fuel Demand, Low-Det":
 | 0xD1280 – 0xD17F8    | **NC2.0 (Late)** |
 | 0xD37FC – 0xDBD80    | **NC3.0** |
 
-The gap between the highest NC2-late address (0xD17F8) and the lowest NC3 address (0xD37FC) is over 8KB — there is no ambiguity zone.
+The gap between the highest NC2-late address (0xD17F8) and the lowest NC3 address (0xD37FC) is approximately 8KB (8,196 bytes). No known ROM falls in this gap. If a future ROM has an address in the range 0xD1800–0xD37FB, it likely represents a new sub-generation — investigate manually rather than forcing a classification.
 
 **Alternative C discriminator using ROM ID prefixes:**
 - Prefixes `LFL`, `LFM`, `LFGJ`, `LFGK`(ED+), `LFGM`(EE+), `LFGN`(EE+), `LFGP` → NC3.0
 - Prefixes `L862`, `LF9H`(EE), `LF9K`(EE), `LF9R`, `LF9S`, `LF9T`, `LFF`, `LFGK`(EC), `LFGM`(EC), `LFGN`(EC) → NC2.0 (Late)
 
-Note: The suffix letter matters — LF9HED is NC2-early while LF9HEE is NC2-late.
+Note: The suffix letter matters for distinguishing generations — see Discriminator B above.
 
 ### Decision Tree Summary
 
@@ -130,9 +134,15 @@ You need to find the address of **one known table** in the new ROM binary. The b
 - It's a 3D table with a distinctive data pattern (spark advance values in float format)
 - Its dimensions are generation-specific (210 or 225 elements)
 
-### How to Find It in a Raw Binary
+### If a metadata XML already exists for a reference ROM in the same sub-group
 
-1. **Byte-scan for the Y-axis data.** The Y-axis immediately precedes the X-axis, which immediately precedes the table data. The Y-axis contains RPM breakpoints as big-endian floats (e.g., 500.0, 1000.0, 1500.0, ... 7000.0 or 7500.0).
+Simply look up the address in the reference ROM's XML file. No binary scanning needed — just compute the delta (Step 4).
+
+### How to Find It in a Raw Binary (only needed for truly unknown ROMs)
+
+If no reference XML exists or you need to locate the table from scratch in a raw binary:
+
+1. **Byte-scan for the Y-axis data.** The Y-axis immediately precedes the X-axis (no padding), which immediately precedes the table data. The Y-axis contains RPM breakpoints as big-endian floats (e.g., 500.0, 1000.0, 1500.0, ... 7000.0 or 7500.0).
 
 2. **Search for the RPM float sequence.** Common RPM breakpoints stored as IEEE 754 big-endian floats:
    - 500.0 = `0x43FA0000`
@@ -142,7 +152,9 @@ You need to find the address of **one known table** in the new ROM binary. The b
 
 3. **Verify by checking the X-axis.** The X-axis should contain LOAD breakpoints as big-endian floats, typically values like 4.2, 5.6, 7.0, ... up to ~22.0.
 
-4. **The table data starts 60 bytes after the X-axis start** (X-axis offset = -60 from table).
+4. **The table data starts at** `X_axis_address + (X_elements × 4)` bytes. For the standard 15-element X-axis, this is 60 bytes.
+
+5. **Disambiguate from other spark tables.** All 8 spark target tables share the same RPM/LOAD axis types. Use the inter-table offsets (Step 5) to confirm you found HFD Low-Det specifically, not one of the other 7. Its position is 5th in address order (after both High-Det tables and both Low Fuel Demand High-Det tables).
 
 ### Expected Address Ranges by Generation
 
@@ -170,22 +182,30 @@ delta = 0xD0BE0 - 0xD0B60 = +0x80 (128 bytes)
 
 ### Validate the Delta
 
-The delta should be **the same for all factory base tables** within the same category block. Verify by checking 2-3 other tables:
+The delta should be **the same for all 8 Spark Target base tables**. Verify by checking 2-3 other spark tables:
 
 - Check "Spark Target | High Fuel Demand, High-Det" — should be at `reference_addr + delta`
-- Check a table from a different category (e.g., "Fuel Target OL") — should also show the same delta if it's in the same calibration block
+- Check "Spark Target | Low Fuel Demand, Low-Det" — should also match
 
-**WARNING:** Different category blocks may have different deltas. The spark tables, fuel tables, and other calibration blocks may shift independently. Always verify the delta for each major category block separately.
+**CRITICAL:** The spark target delta applies reliably to all 8 Spark Target base tables and has been observed to match Fuel Target OL tables in tested cases. However, **other category blocks shift independently.** Verified examples of divergent deltas between ROM pairs:
+
+- MAF Scaling tables shift by different amounts than Spark Target tables
+- Idle Speed tables can have mixed deltas even within the same category
+- Fuel Status tables show per-table variation
+
+**You must compute a separate delta for each major category block.** Find at least one anchor table per category in the binary and compute its own delta from the reference ROM.
 
 ---
 
 ## Step 5: Predict All Table Addresses
 
-Apply the delta to every table address from the reference ROM's metadata XML:
+Apply the spark target delta to predict all 8 Spark Target base table addresses:
 
 ```
-new_address = reference_address + delta
+new_spark_address = reference_spark_address + spark_delta
 ```
+
+**For non-spark categories**, you must compute a separate delta per category block. Do not apply the spark delta globally.
 
 ### Inter-Table Offsets (Constant Within Generation)
 
@@ -252,15 +272,15 @@ After predicting all addresses, validate by:
 
 4. **Suppose** HFD Low-Det is at 0xCF3C0 (delta = +0x1C from A2 reference 0xCF3A4).
 
-5. **Predict** all other table addresses by adding +0x1C to every address in the LFG1EK (A2 reference) metadata XML.
+5. **Predict** all other spark target table addresses by adding +0x1C to every spark target address in the LFG1EK (A2 reference) metadata XML. For non-spark categories, compute separate deltas.
 
-6. **Cross-validate**: Check that HFD Low-Det IMRC is at 0xCF3C0 - 596 = 0xCF174. Read that address — should contain 120 float elements of spark advance data.
+6. **Cross-validate**: Check that HFD Low-Det IMRC is at 0xCF3C0 - 596 = 0xCF16C. Read that address — should contain 120 float elements of spark advance data.
 
 ---
 
 ## Known Edge Cases
 
-- **LFLPEB**: Missing checksummodule value (all other ROMs have `21053000`). May need special handling for checksum correction.
+- **LFLPEB**: checksummodule element is present in XML but contains value `None` (all other ROMs have `21053000`). May need special handling for checksum correction.
 - **LFLEEC**: Singleton sub-group, +124 bytes offset from the nearest NC3 group (B3d). Likely a minor firmware revision.
 - **Trailing space**: The XML table name `"Spark Target | Low Fuel Demand, Low-Det "` has a trailing space in all 103 XMLs. Strip whitespace when doing name matching.
 - **L3R3EE**: Mazda6 ROM, not MX-5. Has no spark target tables. Do not use as a reference.
