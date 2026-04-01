@@ -56,3 +56,4 @@ dkms.conf
 Thumbs.db
 *.log
 metadata/l3r3ee.xml
+*.BIN
